@@ -1,0 +1,985 @@
+《宇宙存续论》
+
+1. 状态与守恒量
+
+状态向量：
+S = (P, K, D, B, V, R)
+
+其中：
+- P：活动能量池，实数 ≥ 0
+- K：整数结数，K ∈ Z, 0 ≤ K ≤ 9
+- D：耗散，实数 ≥ 0
+- B：背景池，实数 ≥ 0
+- V：死寂池，实数 ≥ 0
+- R：源池，实数 ≥ 0
+
+总守恒量：
+Q(S) = P + 2K + D + B + V + R
+
+每一步更新必须满足：
+Q(S_t+1) = Q(S_t)
+
+2. 每步先算两个标量
+
+给定参数：
+θ0, u0, η, γ, δ, k*
+
+本步开始时：
+u_t = max( u0 * (1 - D_t / Q), 10^-3 )
+
+θ_t = θ0 + η * |K_t - k*| / max(P_t, 0.5)
+
+判据：
+θ_t^2 < 0.8 * u_t   => 减结分支
+θ_t^2 > 1.2 * u_t   => 增结分支
+中间区域进入迟滞分支。
+
+3. 分支更新规则
+按固定顺序判断，先命中先执行：
+
+3.1 停止分支
+若：B ≤ 0.5 且 R < 2
+则系统停止，不再更新：S_t+1 = S_t
+
+3.2 重置分支
+若：B ≤ 0.5 且 R ≥ 2
+先算旧四元组：Q_old = P + 2K + D + B
+然后：(P, K, D, B, V, R) ← (2, 0, 0, 0.9*Q_old, V + 0.1*Q_old, R - 2)
+
+3.3 触顶分支
+若：K ≥ 9
+则：P ← P + 18， K ← 0
+
+3.4 减结分支
+若：P > 0， K ≥ 1， θ_t^2 < 0.8*u_t
+则：P ← P + 1.9， K ← K - 1， D ← D + 0.1
+
+3.5 增结分支
+若：(K ≤ 0 或 θ_t^2 > 1.2*u_t) 且 (P + B ≥ 2)
+则：
+d_P = min(P, 2)
+d_B = 2 - d_P
+P ← P - d_P， K ← K + 1， B ← B - d_B
+
+3.6 迟滞分支
+否则：
+b = min( B, max(0, δ - P) )
+d = min( P + b, δ )
+P ← P + b - d， D ← D + d， B ← B - b
+
+3.7 后处理注入
+在非停止分支执行完后，用更新后的 K 计算：
+ρ0 = γ * u_t * (k* - K)
+若：ρ0 > 0 且 B ≥ ρ0
+则：P ← P + ρ0， B ← B - ρ0
+这一步满足：ΔP + ΔB = ρ0 - ρ0 = 0
+
+4. 可直接运行的 Python 代码
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class State:
+    pool: float = 10.0
+    knot: int = 3
+    diss: float = 1.0
+    bg: float = 5.0
+    void: float = 0.0
+    source: float = 100.0
+
+@dataclass
+class Params:
+    theta0: float = 0.0
+    u0: float = 1.0
+    eta: float = 0.05
+    gamma: float = 0.8
+    delta: float = 0.01
+    k_star: float = 4.5
+
+def Q(s: State) -> float:
+    return s.pool + 2.0 * s.knot + s.diss + s.bg + s.void + s.source
+
+def u_value(s: State, p: Params, q0: float) -> float:
+    return max(p.u0 * (1.0 - s.diss / q0), 1e-3)
+
+def theta_value(s: State, p: Params) -> float:
+    return p.theta0 + p.eta * abs(s.knot - p.k_star) / max(s.pool, 0.5)
+
+def step(s: State, p: Params, q0: float):
+    q_before = Q(s)
+    u = u_value(s, p, q0)
+    theta = theta_value(s, p)
+
+    event = "NONE"
+    halted = False
+
+    # 1. 停止
+    if s.bg <= 0.5 and s.source < 2.0:
+        event = "HALT"
+        halted = True
+        return event, theta, False, halted
+
+    # 2. 重置
+    elif s.bg <= 0.5 and s.source >= 2.0:
+        q_old = s.pool + 2.0 * s.knot + s.diss + s.bg
+        s.pool = 2.0
+        s.knot = 0
+        s.diss = 0.0
+        s.bg = 0.9 * q_old
+        s.void += 0.1 * q_old
+        s.source -= 2.0
+        event = "RESET"
+
+    # 3. 触顶
+    elif s.knot >= 9:
+        s.pool += 18.0
+        s.knot = 0
+        event = "BREAK"
+
+    # 4. 减结
+    elif s.pool > 0 and s.knot >= 1 and theta * theta < 0.8 * u:
+        s.pool += 1.9
+        s.knot -= 1
+        s.diss += 0.1
+        event = "DEC_KNOT"
+
+    # 5. 增结
+    elif (s.knot <= 0 or theta * theta > 1.2 * u) and (s.pool + s.bg >= 2.0):
+        d_pool = min(s.pool, 2.0)
+        d_bg = 2.0 - d_pool
+        s.pool -= d_pool
+        s.knot += 1
+        s.bg -= d_bg
+        event = "INC_KNOT"
+
+    # 6. 迟滞
+    else:
+        b = min(s.bg, max(0.0, p.delta - s.pool))
+        d = min(s.pool + b, p.delta)
+        s.pool += b - d
+        s.diss += d
+        s.bg -= b
+        event = "HYSTERESIS"
+
+    # 7. 后处理注入
+    rho0 = p.gamma * u * (p.k_star - s.knot)
+    refilled = False
+    if rho0 > 0 and s.bg >= rho0:
+        s.pool += rho0
+        s.bg -= rho0
+        refilled = True
+
+    q_after = Q(s)
+    assert abs(q_after - q_before) < 1e-9, (q_before, q_after, event)
+
+    return event, theta, refilled, halted
+
+if __name__ == "__main__":
+    s = State(pool=10.0, knot=3, diss=1.0, bg=5.0, void=0.0, source=100.0)
+    p = Params()
+    q0 = Q(s)
+    print("Q0 =", q0)
+
+    for t in range(20):
+        event, theta, refilled, halted = step(s, p, q0)
+        print(t, event, "theta=%.6f" % theta, "refill=", refilled, "P=%.3f" % s.pool, "K=", s.knot, "D=%.3f" % s.diss, "B=%.3f" % s.bg, "V=%.3f" % s.void, "R=%.3f" % s.source, "Q=%.6f" % Q(s))
+        if halted:
+            print("HALTED")
+            break
+```
+
+5. 默认参数说明
+theta0 = 0.0
+u0 = 1.0
+eta = 0.05
+gamma = 0.8
+delta = 0.01
+k_star = 4.5
+（这些参数未标定，只能用于模拟。若要进入正式判定，必须先固定参数并记录版本。）
+
+6. 最小结论
+统一量就是：
+Q = P + 2K + D + B + V + R
+
+每步只做三件事：
+1. 算 u_t, θ_t；
+2. 按固定分支更新 S；
+3. 断言 Q(S_t+1) = Q(S_t)。
+
+---
+
+【存续状态机：动力学特性批注】
+
+1. 关于 k∗=4.5k∗=4.5（非整数）： 取半整数是为了防止 K 收敛到整数不动点——若 k∗k∗ 为整数，则 K=k∗K=k∗ 时 θ=0θ=0，DEC/INC 都不触发，系统会永久停在不动点；取 4.5 后 ∣K−k∗∣∣K−k∗∣ 在整数 K 上最小为 0.5，理论上可形成“趋近但未满”的极限环。但 k∗k∗ 只设张力中心，不保证极限环位置——极限环由 θ 定义、分支规则和 uu 衰减共同决定。当前参数下 K 锁死在 0↔1：K=1 时 θ2≈(0.05×3.5/P)2≈10−4θ2≈(0.05×3.5/P)2≈10−4，而 0.8u≈0.80.8u≈0.8，差四个数量级，DEC 永远触发；K=0 时 DEC 不满足，强制 INC 回 1，故 K 到不了 2 更到不了 4.5。这是量纲失配（θ 除以 P 被压制）加半整数中心（K=4/5 附近 θ 天然趋零）的结果，调 η 只能挪锁死位置，真正解决需改 θ 定义（去 /P）或改分支规则（给 K 额外推力），属结构设计而非参数标定。
+
+2. 关于单向补帧： REFILL 仅在 K 低于 k∗k∗ 时按结构缺口补 P（ρ0=γu(k∗−K)ρ0​=γu(k∗−K)），不是按 P 低补。当系统失控暴涨（K 撞向 9）时，REFILL 不负责抽水干涉，任由 K 触发 BREAK（触顶解体，K→0,P+18K→0,P+18），不是 RESET（纪元重启）。BREAK 是“结构解体”，RESET 是“纪元重启”，两个分支不同。单向补帧的数学表达是：结构缺口补，结构过剩不抽。
+
+3. 关于分支优先级： 分支按固定顺序判断，先命中先执行：HALT → RESET → BREAK → DEC → INC → HYST。HALT 和 RESET 互斥（按 R<2 还是 R≥2 分岔），不会同时触发。BREAK（K≥9）优先级高于 DEC/INC/HYST，但低于 HALT/RESET。HALT 是刚性吸收态：一旦触发，系统冻结，不再更新。
+
+4. 关于迟滞分支： 迟滞（弛豫）分支表示：只要帧序推进，就必然有微量能量从 P 或 B 转入 D（耗散），不是 V（死寂）。D 是“已转化为热/废热的能量”，V 是“纪元重置时划入的不可用残渣”。两者不同账本。迟滞的物理含义是“基底耗散”——系统在相变冻结时仍持续产生微量耗散，确保时间箭头不停止。
+
+5. 关于 D 的单调性（时间箭头）： 在无 RESET 的段内，D 单调递增，utut​ 单调递减，演化率随时间衰减。但 RESET 分支把 D 清零（D←0D←0），utut​ 随之跳升——这是比 D 回收更陡的逆箭头来源。所以 D 的全局行为是“段内单调增 + RESET 时归零”，不是全局单调递增。“D 回收是唯一逆箭头来源”不成立；RESET 清 D 是第二条。
+
+6. 关于 QQ 的绝对守恒： 所有分支（HALT、RESET、BREAK、DEC、INC、HYST）均为守恒转移，ΔQ=0ΔQ=0 逐分支成立。不存在“凭空产生能量”或“能量凭空消失”的分支。RESET 的 10% 入死寂 VV、90% 回背景 BB，是守恒转移，不是“重置总量”。QQ 是引擎的绝对不变量，不随任何分支改变。
+
+7. 关于 uu 的双重角色： utut​ 同时控制 REFILL 的强度和相变判据的阈值。这意味着：DD 增加时，补帧变弱且相变变难，两个效应叠加。这是设计选择——它让系统“越老越保守”。若需解耦，应引入两个独立的衰减率 urefillurefill​ 和 uphaseuphase​，但当前版本未解耦。
+
+8. 关于三态分岔边界： 0.8u0.8u 和 1.2u1.2u 是 DEC/HYST/INC 的分岔边界。边界随 uu 衰减而收缩——u→10−3u→10−3 时，三态区间退化为 θ2<0.0008θ2<0.0008、0.0008≤θ2≤0.00120.0008≤θ2≤0.0012、θ2>0.0012θ2>0.0012。末期相变窗口变窄：若 θ2θ2 远大于阈值，进入 INC（增结）；只有落在中间带才进入 HYST（迟滞）。 不是“末期几乎总是迟滞”。
+
+9. 关于“无限运行”的必要条件（定性判据）： 系统能长期运行，必要但不充分的条件是：① R 不耗尽；② D/Q 不趋近 1；③ K 不锁死。三条中任一条不成立，系统必然在有限帧内进入 HALT 或 BREAK。但三条同时成立不保证长期运行——B 被抽到 ≤0.5≤0.5 且 R<2R<2 时仍会 HALT，而 B 的状态不被三条覆盖。这是定性必要条件，不是充分条件的形式证明。
+
+---
+
+
+---
+
+# 补帧算子完整规格 v3.5（定稿 · 含完整推导）
+
+纯数学 / 程序形式 · 含推导 · 不依赖外部状态机
+
+---
+
+# 第一部分 · 算子本体
+
+## 1. 定位与问题
+
+补帧算子是一个独立守恒转移算子。两个阶段：
+- 启动段（一次性）：P → D。启动损耗从活动池转入耗散，不消失。
+- 运行段（每帧）：B → P。把背景池的形态转化为活动池的形态。
+
+问题形式化：给定状态 (P, K, D, B, V, R, started)，在只允许特定分量变化的约束下，构造转移函数 F_fill，满足：
+1. 守恒：ΔQ=0；
+2. 方向正确：B → P，不倒灌；
+3. 自适应：P 少时加速，多时减速；
+4. 不自杀：不把 B 抽到外部停止阈值以下；
+5. 可审计：每步可验证。
+
+它不是：能量源、生死判据、外部状态机的子模块。
+
+---
+
+## 2. 状态与守恒量
+
+### 2.1 状态向量（补 started）
+
+S = (P, K, D, B, V, R, started), 其中 P, D, B, V, R ≥ 0，K ∈ Z，0 ≤ K ≤ 9，started ∈ {0, 1}
+
+符号含义：
+- P：活动能量池（提纯后的可用能量）
+- K：拓扑结数（整数，结构复杂度）
+- D：耗散（已转化为热/废热的能量）
+- B：背景池（未提纯的势能）
+- V：死寂池（不可用残渣）
+- R：源池（外部注入资源）
+- started：启动标志（0 未启动，1 已启动）
+
+注：started 是转移函数的必要输入，但不参与守恒量 Q。若只写六元组 (P,K,D,B,V,R)，F_fill 不是该六元组的函数——因为同一六元组在 started=0 与 started=1 下转移不同。严格状态空间应包含 started。
+
+### 2.2 守恒量推导
+
+为什么是 Q = P + 2K + D + B + V + R？
+推导分三步：
+第一步：识别哪些量需要计入。状态有六个连续/离散分量，补帧算子与外部状态机共享同一守恒量，六个分量全部计入，不能遗漏或重复。started 是模式标志，不计入 Q。
+第二步：确定各分量权重。P, D, B, V, R 是连续能量分量，单位相同，权重 1。K 是拓扑结数，单位是“结”，不能与能量直接相加，必须乘转换系数 λ。
+第三步：确定 λ=2。体系公理：“2 单位能量可固化为 1 单位复杂度”，与外部状态机一致。因此 K 贡献 2K。
+
+Q(S) = P + 2K + D + B + V + R
+
+说明：Q 的表达式是建模定义（λ=2 为公理），守恒性由更新规则保证，不是从 Q 的形式推导出来的。
+
+### 2.3 守恒约束
+
+|Q(S_after) - Q(S_before)| ≤ 10^-9 * max(1, |Q(S_before)|)
+
+为什么用相对容差？数学上 ΔQ=0 精确成立。但浮点运算累积误差在大数值下可能超绝对容差。相对容差 ε_rel=10^-9 在 Q 大时放宽、Q 小时收紧，避免误报。形式为 ε_rel * max(1, |Q|)：|Q| ≤ 1 时退化为绝对容差，|Q| > 1 时按比例放宽。
+
+状态非负性前提：B ≥ 0 由 2.1 定义保证。不要求 B ≥ B_min。若 B < B_min，运行段 flow=0，B 不变（见性质 4）。
+
+---
+
+## 3. 位移约束推导
+
+### 3.1 守恒约束推出“哪些分量能动”
+
+补帧算子分两段，各只动特定分量。
+
+启动段：启动损耗从 P 扣除。若凭空消失，则 ΔQ = -P_ignite ≠ 0，破坏守恒。必须转入某分量。选 D（耗散），对应“启动损耗转化为热/废热”。因此：
+ΔP = -P_ignite, ΔD = +P_ignite, ΔB = 0
+验证：ΔQ = (-P_ignite) + (+P_ignite) + 0 = 0。
+
+运行段：转移量 flow 从 B 到 P。方向由补帧职责决定（B → P）：
+ΔP = +flow, ΔB = -flow, ΔD = 0
+验证：ΔQ = +flow - flow = 0。
+
+### 3.2 两段位移约束（不同）
+
+启动段（一次性）：ΔP = -P_ignite, ΔD = +P_ignite, ΔB = 0
+运行段（每帧）：ΔP = +flow, ΔB = -flow, ΔD = 0
+
+不可笼统说“只动 P, B”：启动段动 D，运行段不动 D。
+
+---
+
+## 4. 启动段
+
+### 4.1 条件与更新
+
+if started == 0 且 P ≥ P_ignite:
+P ← P - P_ignite, D ← D + P_ignite, started ← 1
+
+为什么要求 P ≥ P_ignite？若 P < P_ignite，扣除后 P' = P - P_ignite < 0，破坏状态非负性（2.1 定义）。因此启动有门槛。
+
+启动后不再消耗：started=1 后启动段不再执行，不再扣除启动损耗。
+
+准确表述（条件精确化）：
+- 若 started=0 且 P < P_ignite：不启动，started 保持 0，本帧运行段因门控 started ≠ 1 不执行。
+- 若 started=1：启动段不执行；即使 P < P_ignite，运行段仍执行（门控只看 started，不看 P）。
+
+### 4.2 守恒验证
+
+ΔQ = (-P_ignite) + (+P_ignite) + 0 = 0
+
+---
+
+## 5. 压差缺口
+
+### 5.1 推导
+
+补帧的驱动力是压差：B 高出内部基准 B_base 的部分，才是可转化的势能。
+
+为什么用 B - B_base 而不是 B？B_base 是内部基准，代表“系统认为应该保留的背景量”。只有高出基准的部分才是可抽取的“多余势能”。低于基准时没有压差，不应抽取。
+
+为什么取 max(·, 0)？若 B < B_base，B - B_base < 0。若不取 max，gap < 0，则 flow_want = η · gap < 0，方向反转（P → B），倒灌。取 max 后，B ≤ B_base 时 gap=0，自然停转。
+
+gap = max(B - B_base, 0)
+
+### 5.2 B_base 的语义（加 η>0 限定）
+
+gap = 0 <=> B ≤ B_base
+即 gap=0 是一个区域（B ≤ B_base），B_base 是该区域的上边界（压差停止线）。工程语义上称 B_base 为“压差停止线”是简写；数学上是“B_base 以上才有压差，以下无压差”。
+
+它是“实际补帧停止线”吗？需分两层看：
+第一层（B 方向的截断）：当且仅当 B_base ≥ T_halt + ε 时，B_min = B_base，B_base 是 B 方向的截断边界。若 B_base < T_halt + ε，则 B_min = T_halt + ε > B_base，当 B ∈ (B_base, B_min) 时 gap > 0 但 flow_can = 0，B 方向的截断边界是 B_min，不是 B_base。
+第二层（实际 flow > 0 的条件）：即使 B > B_base 且 B > B_min，若 η=0，仍有 flow=0。因此：
+flow > 0 <=> η > 0 且 B > B_min
+（因 B_min ≥ B_base，B > B_min 已蕴含 B > B_base。）
+
+反例（η=0 但 B > B_base）：β=0.5, κ=3, B_base=0.5, T_halt=0.1, ε=0.1，B_min=0.5；P=100, B=1。f ≈ -0.4901，η_raw ≈ -0.235 < 0，η=0；gap=0.5 > 0，但 flow=0。此时 B=1 > B_base，B_base 不是“B 高于它就一定补帧”的停止线。
+
+结论：B_base（或 B_min）是 B 方向的截断边界；实际补帧停止还需 η > 0。若讨论“实际停止线”，应加“在 η > 0 的前提下”。
+
+---
+
+## 6. 负反馈函数
+
+### 6.1 推导（归一化唯一性，对称性表述修正）
+
+补帧不能是常数速率：P 少时应加速补，P 多时应减速补。若转化率不随 P 占比升高而下降，则 P 越多补得越快（正反馈），B 被抽干。（注：常数速率本身不是正反馈；问题是缺少负反馈。）
+
+用 P 在 P+B 中的占比 x = P / (P+B) 作为负载指标。三条要求：
+- x=0：P 为空，应最大加速；
+- x=0.5：P, B 均衡，应中性；
+- x=1：P 满，B 空，应最大减速。
+
+归一化条件：f(0)=0.5, f(0.5)=0, f(1)=-0.5。在这三条归一化条件下，唯一的线性形式是：
+f = 1/2 - x = 1/2 - P / (P+B)
+（一般线性形式 f = c(1/2 - x) 对任意 c>0 都满足单调性，但只有 c=1 同时满足归一化端点值。）
+
+取值分析：x ∈ [0, 1] => f ∈ [-0.5, 0.5]。
+
+等价形式（化简）：
+f = 1/2 - P/(P+B) = (P+B-2P) / (2(P+B)) = (B-P) / (2(P+B))
+
+对称性（修正）：f 关于 P, B 反对称：
+f(P,B) = -f(B,P)
+即 P, B 互换时 f 取反。但 η 与 flow 并不随之简单交换：
+- 无截断时 η(P,B) + η(B,P) = 2β（η 关于 β 互补，不是交换）；
+- flow = min(η·gap, flow_can)，交换 P, B 会改变 gap（因 B 变了）和 flow_can，所以 flow 不是简单交换，也不是固定比例。
+
+数值示例（修正）：β=0.5, κ=1。
+- (P,B) = (0.3, 0.7)：f = 0.2，η = 0.6。B_base=0.5, B_min=0.5 => gap=0.2, flow=0.12。B_base=0, B_min≈0 => gap=0.7, flow=0.42。
+- (P,B) = (0.7, 0.3)：f = -0.2，η = 0.4。B_base=0.5, B_min=0.5 => gap=0, flow=0。B_base=0, B_min≈0 => gap=0.3, flow=0.12。
+
+两个状态 Q 相同（P+B=1），f 取反，η 为 0.6 与 0.4（和 = 1 = 2β），但 flow 因 gap 与 flow_can 不同而不同——不是交换，也不是 1.5 倍。1.5 只是 η 的比值，不是 flow 的比值。
+
+设计说明：算子对 P, B 相对位置敏感（f 反对称），这是设计选择；若希望更平滑，可选 f = c(1/2 - x) 缩小 c，或改用非线性饱和曲线。属设计选择，非错误。
+
+### 6.2 除零防护（安全理由由 flow_can=0 给出，依赖 B_min≥0）
+
+P+B=0（即 P=B=0）时 f 无定义。约定 f=0 是安全的，理由：
+此时 B=0。由硬约束 (2) B_min ≥ 0，有：
+flow_can = max(B - B_min, 0) = max(0 - B_min, 0) = 0
+因此：
+flow = min(η · gap, flow_can) = 0
+不管 gap 是否为 0，flow 都为 0。所以约定 f=0 不影响转移结果。该论证依赖 B_min ≥ 0；若 B_min < 0，则 flow_can > 0，约定 f=0 可能影响结果。硬约束 (2) 保证 B_min ≥ 0，故安全。
+
+f = 1/2 - P/(P+B) (P+B > 0)；f = 0 (P+B = 0)
+
+---
+
+## 7. 转化率与钳位
+
+### 7.1 公式推导（钳位读法明确化，上限推导重写）
+
+反馈 f 调制基础转化率 β：
+η_raw = β(1 + κf)
+- β：基础转化率（f=0 时 η=β）；
+- κ：反馈强度（f 每变化 1，η 变化 κβ）。
+
+必须钳位到 [0, 1]：
+η = clamp(η_raw, 0, 1)，η_raw = β(1 + κf)
+
+记号约定（修正）：记 η_lower = max(η_raw, 0) 为仅下限钳位后的值（可 ≥1）；η = min(η_lower, 1) 为完整钳位后的值。
+
+下限 0 的推导：若 η_raw < 0 且 gap > 0，则 flow_want = η_raw · gap < 0，而 flow_can ≥ 0，故若不钳位，flow = min(η_raw·gap, flow_can) = η_raw·gap < 0，P 转回 B，方向反转。钳位到 0 后 η_lower ≥ 0，保证 flow ≥ 0（性质 3）。若 gap=0，则 flow_want = η·0 = 0，不会倒灌；此时钳位到 0 仍正确，只是不是必须的。
+
+上限 1 的推导（重写，无漏洞）：
+分两种读法：
+(a) 只取消上限钳位、保留下限钳位（即 η=η_lower，可能 >1）：
+- 若 B ≥ B_min：flow_can = B - B_min ≤ B - B_base = gap（因 B_min ≥ B_base），故 flow = min(η_lower·gap, flow_can) ≤ flow_can ≤ gap。
+- 若 B < B_min：flow_can = 0，η_lower ≥ 0，gap ≥ 0，故 flow = min(η_lower·gap, 0) = 0 ≤ gap。
+所以即使不钳上限，flow ≤ gap 仍成立（保留下限钳位）。
+
+(b) 完全取消钳位（η=η_raw，可能 <0）：
+- 若 B ≥ B_min：flow ≤ flow_can ≤ gap（即使 flow < 0，仍 ≤ gap）。
+- 若 B < B_min：flow_can = 0。若 η_raw ≥ 0，flow=0 ≤ gap；若 η_raw < 0，flow = η_raw·gap < 0 ≤ gap。
+所以完全取消钳位时，flow ≤ gap 仍成立，但 flow ≥ 0 不再保证（方向可能反转）。
+
+结论：flow ≤ gap 不依赖上限钳位；上限钳位到 1 的真正作用是保证 η 的物理意义（转化率 ≤ 100%），并保证 η ≥ 0 的方向性（与下限钳位共同）。防自杀（flow ≤ flow_can）由取小结构直接保证；防越过压差（flow ≤ gap）由 flow_can ≤ gap 与取小结构联合保证；两者均与上限钳位无关。
+
+钳位到 1 对 flow 的恒等性：在保留下限钳位且 B_min ≥ B_base 下，若 η_raw > 1，则 flow_can ≤ gap < η_raw·gap，故 flow = min(η_raw·gap, flow_can) = flow_can；钳位后 η=1，flow = min(gap, flow_can) = flow_can。所以上限钳位不改变 flow，只改变 η 的显示值。
+
+### 7.2 反馈非退化条件
+
+非退化（反馈确实随 f 变化）：β > 0 且 κ > 0。
+- κ=0：η = clamp(β, 0, 1)，与 f 无关，反馈不起作用；
+- β=0：η ≡ 0，补帧停止，反馈也不起作用。
+参数域已要求 β ∈ (0,1]、κ > 0，因此退化情形不在合法域内。
+
+### 7.3 反馈有效性分类
+
+记：L = β(1 - 0.5κ)，H = β(1 + 0.5κ)
+因 f ∈ [-0.5, 0.5]，η_raw ∈ [L, H]。
+
+完全线性有效（不触任何 clamp）：需要两端都不越界：
+L ≥ 0 且 H ≤ 1
+即 β(1 - 0.5κ) ≥ 0 且 β(1 + 0.5κ) ≤ 1。
+
+反例（只写上界不够）：β=0.2, κ=3 时 H=0.5 ≤ 1 满足上界，但 L=-0.1 < 0，低端被钳到 0，不是完全线性。
+
+部分有效（至少一端触 clamp，但 η 仍随 f 变化）：在合法域 β ∈ (0,1], κ > 0 内，L < 1 恒成立，故部分有效等价于 L < 0 或 H > 1。（一般分类下还需排除 H ≤ 0 => η ≡ 0 的恒 0 失效；合法域内 H > 0，故不需排除。）
+
+完全失效（两种，均为域外/理论分类）：
+- 恒为 1 失效：L ≥ 1 => η ≡ 1；
+- 恒为 0 失效：H ≤ 0 => η ≡ 0。
+在合法域 β ∈ (0,1]、κ > 0 内：L < 1 恒成立，恒 1 失效不会发生；H > 0 恒成立，恒 0 失效不会发生。两类均保留为域外/理论分类。
+
+推荐起点：β=0.5, κ=1 => L=0.25, H=0.75，完全线性有效。
+
+---
+
+## 8. 转移量
+
+### 8.1 硬下限推导（措辞修正）
+
+为什么要下限？外部状态机在 B ≤ T_halt 时触发停止/重置。补帧不能把 B 抽到 T_halt 或以下，否则下一帧 HALT，算子自杀。因此安全条件是 B > T_halt（严格）。
+
+为什么取 max(B_base, T_halt + ε)？
+- B_base：补帧本身的压差停止线。B ≤ B_base 时 gap=0，自然停转；
+- T_halt + ε：外部停止阈值加容差，防止把 B 抽到 HALT 或以下；
+- 取 max：两者都要满足。
+
+B_min = max(B_base, T_halt + ε)，ε > 0
+
+注：B_min > T_halt 保证 B' ≥ B_min > T_halt，即严格大于停止阈值；若只说“不到 T_halt 以下”，会漏掉 B'=T_halt 仍触发 HALT 的情形。公式本身正确，措辞需严格。
+
+### 8.2 转移量推导
+
+“想转多少”：按转化率和压差计算：
+flow_want = η · gap
+
+“能转多少”：不能把 B 抽到 B_min 以下：
+flow_can = max(B - B_min, 0)
+
+取小：
+flow = min(flow_want, flow_can) = min(η · gap, max(B - B_min, 0))
+
+三条性质（因果链拆分）：
+- 非负：flow ≥ 0（两项都非负，取 min 后非负）。
+- 不超抽：flow ≤ flow_can。由取 min 直接保证，与 η 是否钳位、与 B_min ≥ B_base 均无关。
+- 不越过压差缺口：flow ≤ gap。由 flow ≤ flow_can ≤ gap 保证，其中 flow_can ≤ gap 依赖 B_min ≥ B_base（由 max 定义自动成立）。
+
+注意：不可写“flow ≤ η·gap ≤ gap（因 η ≤ 1）”——这会把两条因果链混为一谈。正确读法是：
+1. flow ≤ η·gap（取 min 直接保证，无需 η ≤ 1）；
+2. flow ≤ gap（由 flow_can ≤ gap 保证，无需 η ≤ 1）；
+3. η ≤ 1 只影响 flow_want 的物理意义（转化率不超 100%），不影响 flow ≤ gap 的成立。
+
+### 8.3 B_min 的语义（作用域限定）
+
+B_min 是从上方不可穿越的下限/停止线（floor），不是从下方自动恢复的目标线，也不是上限。
+- 初态 B ≥ B_min：运行段保证 B' ≥ B_min，不会从上方穿过；
+- 初态 B < B_min：flow=0，B'=B，补帧算子不动作，不会把 B 拉回 B_min。
+
+作用域限定：上述“不可穿越”在单帧 run_step 内成立。在合体级（boundary + REFILL + run_step），需 boundary 返回合法状态（见 §19）且 REFILL 满足 ρ ≤ max(B - B_min, 0)（见 §18.2 合体级结论），才能保证连续帧上 B ≥ B_min。若外部 boundary 违反契约，B_min 的不可穿越性不再保证。
+
+---
+
+## 9. 结算与守恒断言
+
+### 9.1 结算
+
+B ← B - flow, P ← P + flow
+
+### 9.2 守恒验证
+
+ΔQ = ΔP + ΔB = +flow - flow = 0
+
+### 9.3 断言（注明断言范围）
+
+|Q_after - Q_before| ≤ 10^-9 * max(1, |Q_before|)
+
+断言范围说明：上式验证的是整个 fill_step（启动段 + 运行段）的净差，不是逐段断言。启动段与运行段各自守恒，合在一起净差也为 0；断言在 fill_step 末尾统一检查。代码中 Q_before 取 fill_step 开始时的帧初值，Q_after 取 fill_step 结束时的值，两者之差应满足上式。
+
+不通过则拒绝本帧，记录 FILL_CONSERVATION_FAIL。
+
+---
+
+## 10. 最小结构（八行，同帧顺序与 §4.1 统一）
+
+启动：started=0, P ≥ P_ignite => P ← P - P_ignite, D ← D + P_ignite, started ← 1
+门控：仅当 started=1 执行以下运行段；否则跳过
+压差：gap = max(B - B_base, 0)
+反馈：f = 1/2 - P/(P+B) (P+B>0), f=0 (P+B=0)
+转化率：η = clamp(β(1 + κf), 0, 1)
+转移：flow = min(η · gap, max(B - B_min, 0))
+结算：B ← B - flow, P ← P + flow
+守恒：|Q_after - Q_before| ≤ 10^-9 * max(1, |Q_before|)
+
+八行：启动、门控、压差、反馈、转化率、转移、结算、守恒。原称“七行”为历史命名（门控行为后补，计入后为八行），此处更正为“八行最小结构”。
+
+同帧顺序（与 §4.1 统一）：启动段执行后，同一帧继续执行运行段。门控只看 started：若启动段后 started=1，运行段执行；若启动段未执行（started=0 且 P < P_ignite），started 仍为 0，运行段跳过。门控不直接检查 P，P 只影响启动段是否执行。
+
+---
+
+## 11. 硬约束
+
+### 11.1 硬约束四条（按作用分类，充要条件精确化）
+
+B_min = max(B_base, T_halt + ε)
+(1) ε > 0：合体兼容硬约束：保证 B_min > T_halt（防自杀）
+(2) B_min ≥ 0：非负性硬约束
+(3) β ∈ (0, 1]：反馈非退化硬约束（β=0 退化）
+(4) κ > 0：反馈非退化硬约束（κ=0 退化）
+
+分类说明：
+- 不满足 (2)：性质 2（非负性）可能失效；§6.2 除零安全论证也依赖 (2)。
+- 不满足 (3)(4)：性质 5/6 退化（反馈不起作用）；
+- 不满足 (1)：不影响算子本体的守恒、非负、不倒灌、不超抽。精确的防自杀条件是 B_min > T_halt，它等价于 B_base > T_halt 或 ε > 0。不满足 (1)（即 ε ≤ 0）时：
+  - 若 B_base > T_halt：则 B_min ≥ B_base > T_halt，必然 B_min > T_halt，防自杀仍成立；
+  - 若 B_base ≤ T_halt：则 B_min ≤ T_halt，补帧可能把 B 抽到外部 HALT 阈值或以下，与外部停止阈值冲突（自杀）。
+
+(1) 是充分条件，不是必要条件。精确的防自杀条件是：
+B_min > T_halt <=> (B_base > T_halt) 或 (ε > 0)
+
+硬约束 (2) 的充要条件（修正）：因为 max(a,b) ≥ 0 <=> a ≥ 0 或 b ≥ 0，所以：
+B_min ≥ 0 <=> (B_base ≥ 0) 或 (T_halt + ε ≥ 0)。
+工程默认 B_base ≥ 0 且 T_halt ≥ 0, ε > 0，通常自动满足。硬约束 (2) 本身要求 B_min ≥ 0；上述等价式是它的充要条件，不只是充分条件。
+
+合法域核心：
+- 本体合法域：B_min ≥ 0、β ∈ (0,1]、κ > 0；
+- 合体附加：ε > 0（充分保证 B_min > T_halt）。
+
+### 11.2 完全线性有效条件（附加，非硬约束）
+
+(5) β(1 - 0.5κ) ≥ 0：反馈下端不触 clamp
+(6) β(1 + 0.5κ) ≤ 1：反馈上端不触 clamp
+
+不是硬约束。不满足 (5)(6) 时，算子仍守恒、非负、不倒灌；只是 η 在部分 f 区间触 clamp，反馈不是完全线性。
+
+---
+
+## 12. 已证性质（六条，完整证明）
+
+### 性质 1（守恒）
+证明：启动段 ΔP=-P_ignite, ΔD=+P_ignite，ΔQ=(-P_ignite)+(+P_ignite)+0=0。运行段 ΔP=+flow, ΔB=-flow，ΔQ=+flow-flow=0。∎
+
+### 性质 2（非负性）
+条件：硬约束 (2) B_min ≥ 0，且状态非负性前提 B ≥ 0（第 2 节）。
+结论：B' ≥ min(B, B_min)
+证明：
+- 启动段：P ≥ P_ignite => P' = P - P_ignite ≥ 0；D 只增。
+- 运行段 flow ≥ 0 且 flow ≤ max(B - B_min, 0)，故 B' = B - flow ≥ B - max(B - B_min, 0)。
+  - 若 B ≥ B_min：B - max(B - B_min, 0) = B - (B - B_min) = B_min，故 B' ≥ B_min；
+  - 若 B < B_min：max(B - B_min, 0) = 0，flow=0，B'=B（此时下限是 B 本身，不是 B_min）。
+- 合并：B' ≥ min(B, B_min) ≥ 0（由 B ≥ 0 与硬约束 (2)）。
+- P' = P + flow ≥ P ≥ 0。∎
+
+注：在 B < B_min 时，“B' ≥ B_min”不成立，正确结论是 B'=B。性质 4 会给出更精确的分段表述。
+
+### 性质 3（不倒灌）
+证明：η ∈ [0, 1], gap ≥ 0 => η·gap ≥ 0；max(B - B_min, 0) ≥ 0；取 min 后 flow ≥ 0。∎
+
+### 性质 4（不超抽，分段）
+B' ≥ min(B, B_min)
+- B ≥ B_min => B' ≥ B_min
+- B < B_min => flow=0, B'=B < B_min
+
+证明：flow ≤ max(B - B_min, 0)，故 B' = B - flow ≥ B - max(B - B_min, 0)。
+- B ≥ B_min：B - max(B - B_min, 0) = B - (B - B_min) = B_min，故 B' ≥ B_min；
+- B < B_min：max(B - B_min, 0) = 0，flow ≤ 0，又 flow ≥ 0，故 flow=0，B'=B。∎
+
+语义：B_min 是上方不可穿越下限，不是吸引线。
+
+注（两条因果链分开写）：
+- flow ≤ flow_can（防超抽/防自杀）：由取 min 直接保证，与 B_min ≥ B_base 无关，与 η 是否钳位无关。这是性质 4 成立的核心。
+- flow ≤ gap（防越过压差缺口）：由 flow ≤ flow_can 与 flow_can ≤ gap 联合保证。其中 flow_can ≤ gap 依赖 B_min ≥ B_base（由 max 定义自动成立）。
+  - 钳位后 η ≤ 1，flow ≤ η·gap ≤ gap 也成立；此时 flow ≤ gap 有两条独立证明路径（钳位路径与 B_min ≥ B_base 路径），任一都够。
+  - 不钳位时，若 B_min < B_base（违反硬约束），则 flow_can > gap，η_raw > 1 时可能 flow > gap。反例：B=1, B_base=0.9, B_min=0.5, η_raw=1.5，得 flow=0.15 > gap=0.1。所以在不钳位时，B_min ≥ B_base 是 flow ≤ gap 的必要条件。
+  - 在合法域内（B_min ≥ B_base 自动成立），无论是否钳位，flow ≤ flow_can ≤ gap，所以 flow ≤ gap 恒成立。
+
+### 性质 5（负反馈方向正确，明确 x）
+一般情形（P+B>0）：f = 1/2 - P/(P+B) = (B-P)/(2(P+B))
+其中 x = P/(P+B) 是 P 在总量中的占比。
+
+边界与退化点（互斥）：
+- P=0, B>0 => f=0.5
+- P=B>0 => f=0
+- B=0, P>0 => f=-0.5
+- P+B=0 => f=0 (约定)
+
+一般情形（中间值）：P>0, B>0, P≠B => f = (B-P)/(2(P+B)) ∈ (-0.5, 0.5) \ {0}
+
+方向证明：P 占比低 => x < 0.5 => f = 0.5 - x > 0（转化率加速）；P 占比高 => x > 0.5 => f < 0（转化率减速）。∎
+
+注：“加速/减速”指转化率 η 层面，不是指每帧 flow 一定更大/更小。实际 flow = min(η·gap, flow_can)，还受 gap 和 flow_can 截断；例如 P 低但 B 也低时 gap 小，flow 未必更大。f 关于 P/B 反对称（f(P,B) = -f(B,P)），P, B 互换时 f 取反；但 η 与 flow 不随之简单交换（见 §6.1 修正）。
+
+### 性质 6（反馈有效性，区分 η_raw 与 η）
+完全线性有效：硬约束 (3)(4) + 条件 (5)(6)。此时 η_raw ∈ [L, H] ⊆ [0, 1]，不触 clamp，η=η_raw 随 f 线性变化。
+反例：β=0.2, κ=3 时 H=0.5 ≤ 1 但 L=-0.1 < 0，低端触 clamp。
+退化：β=0 或 κ=0 时反馈不起作用，已由硬约束 (3)(4) 排除。
+完全失效：恒 1 失效（L ≥ 1）与恒 0 失效（H ≤ 0）均为域外情形；合法域内 L < 1 且 H > 0 恒成立，两类完全失效均不会发生。
+证明：κ > 0 保证 η_raw 随 f 线性变化。在完全线性有效区（L ≥ 0 且 H ≤ 1），η=η_raw，故 η 随 f 线性变化。在钳位区（η_raw > 1 或 η_raw < 0），η 被 clamp 截断，不随 f 变化（在钳位段内为常数）。因此，“κ > 0 保证 η 随 f 变化”只在完全线性有效区成立；部分有效区中，钳位段内 η 不随 f 变化。∎
+
+---
+
+## 13. 参数表
+
+| 类别 | 参数 | 约束 | 说明 |
+|---|---|---|---|
+| 内在 | P_ignite | > 0 | 启动损耗量 |
+| 内在 | B_base | 工程默认 ≥ 0；推荐 ≥ T_halt + ε | 非负性充分条件；推荐值使 B_base 成为实际停止线 |
+| 内在 | β | (0, 1] | 硬约束 (3) |
+| 内在 | κ | > 0 | 硬约束 (4) |
+| 内在 | ε | > 0 | 硬约束 (1)；充分保证 B_min > T_halt |
+| 外部接口 | T_halt | 工程默认 ≥ 0 | 通过 B_min 间接约束 flow |
+| 合体 | u0 | ≥ 10^-3 | 否则 u = max(u0(1-D/Q0), 10^-3) 可能超过 u0 |
+| 合体 | γ | > 0 | REFILL 速率 |
+| 合体 | k* | (0, 9) | 理想结数（参考点） |
+| 合体 | ignite_before_boundary | {0, 1}，默认 0 | 启动段在 boundary 前/后 |
+
+本体合法域核心：B_min ≥ 0、β ∈ (0, 1]、κ > 0。
+合体附加：ε > 0（充分保证 B_min > T_halt；充要条件为 B_min > T_halt，即 B_base > T_halt 或 ε > 0）。
+完全线性有效附加：β(1 - 0.5κ) ≥ 0、β(1 + 0.5κ) ≤ 1。
+推荐起点：β=0.5, κ=1 => L=0.25, H=0.75。
+
+---
+
+## 14. 程序形式（assert 改显式 raise，浮点截断保非负，输入有限性声明）
+
+```python
+class FillConservationError(Exception):
+    pass
+
+
+def Q(S):
+    P, K, D, B, V, R = S[:6]
+    return P + 2*K + D + B + V + R
+
+
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+
+def ignite_step(P, K, D, B, V, R, started, P_ignite):
+    """只跑启动段：动 P,D。消耗启动损耗 P_ignite，转入耗散 D。"""
+    if started == 0 and P >= P_ignite:
+        P -= P_ignite
+        D += P_ignite
+        started = 1
+    return P, K, D, B, V, R, started
+
+
+def run_step(P, K, D, B, V, R, started,
+             B_base, beta, kappa, eps, T_halt=0.5):
+    """
+    只跑运行段：动 P,B。
+    前置条件：输入须为有限数（非 NaN/Inf）。NaN/Inf 下截断行为不保证。
+    """
+    if started != 1:
+        return P, K, D, B, V, R, started
+
+    gap = max(B - B_base, 0.0)
+
+    denom = P + B
+    f = (0.5 - P / denom) if denom > 0 else 0.0
+
+    eta = clamp(beta * (1.0 + kappa * f), 0.0, 1.0)
+
+    B_min = max(B_base, T_halt + eps)
+    flow = min(eta * gap, max(B - B_min, 0.0))
+    # 浮点安全：显式截断到 B - B_min，且保非负
+    flow = max(0.0, min(flow, B - B_min))
+
+    B -= flow
+    P += flow
+    return P, K, D, B, V, R, started
+
+
+def fill_step(P, K, D, B, V, R, started,
+              P_ignite, B_base, beta, kappa, eps, T_halt=0.5):
+    """本体自测用组合函数。合体层不得调用。输入须为有限数。"""
+    Q_before = P + 2*K + D + B + V + R
+
+    P, K, D, B, V, R, started = ignite_step(
+        P, K, D, B, V, R, started, P_ignite)
+    P, K, D, B, V, R, started = run_step(
+        P, K, D, B, V, R, started, B_base, beta, kappa, eps, T_halt)
+
+    Q_after = P + 2*K + D + B + V + R
+    tol = 1e-9 * max(1.0, abs(Q_before))
+    if abs(Q_after - Q_before) > tol:
+        raise FillConservationError(
+            f"FILL_CONSERVATION_FAIL: {Q_before} -> {Q_after}")
+
+    return P, K, D, B, V, R, started
+```
+
+说明：
+- assert 改显式 raise：Python -O 会移除 assert；若要求“拒绝本帧”，显式异常更可靠。
+- 浮点截断保非负：flow = max(0.0, min(flow, B - B_min))。在 B < B_min 时 B - B_min < 0，min 取负，max(0, ·) 保证 flow=0；与性质 4 的“B < B_min 时 flow=0”一致。
+- 输入须为有限数：NaN/Inf 下 min/max 的传播行为依赖实现，应在调用前检查并拒绝。
+- Q 辅助函数：只取前六分量，started 不计入。
+
+---
+
+# 第二部分 · 合体接口（v2 语义）
+
+## 15. v2 语义声明
+
+本规格为独立 v2 语义，与原状态机原版合体不同：
+
+| 项 | 原状态机 | 本规格 v2 |
+|---|---|---|
+| REFILL | 全有或全无：ρ0 > 0 且 B ≥ ρ0 才全额注入 | 部分注入：ρ = min(ρ0, max(B - B_min, 0)) * 1[ρ0 > 0] |
+| HALT 帧 REFILL | 不 REFILL | 不 REFILL |
+| RESET 帧 REFILL | 重置后继续 REFILL | 不 REFILL |
+| BREAK 帧 REFILL | 触顶后继续 REFILL | 不 REFILL |
+
+若目标是“不改变原状态机语义”，应改用原 REFILL 条件和边界帧后 REFILL。本规格选择 v2 语义：更平滑（防 REFILL 饿死），边界帧不做任何补帧动作（本帧彻底结束）。
+
+---
+
+## 16. 合体时序
+
+```text
+① 算帧初值 u：Q0>0 时 u=max(u0(1-D/Q0),1e-3)；Q0=0 时 u=1e-3
+   其中 Q0=Q(S)=P+2K+D+B+V+R 为帧初值。
+   参数约束：u0 ≥ 1e-3（否则 u 可能超过 u0）。
+② 若 ignite_before_boundary=True：尝试 ignite_step（条件：started=0 且 P≥P_ignite），同步 S
+③ boundary(S) 判边界
+   → 立即检查 boundary 守恒（无论 E 是什么）
+   → HALT / BREAK / RESET：本帧结束，不 REFILL、不跑运行段
+   → 边界内：
+       a. REFILL（带 B_min，v2 部分注入）
+       b. 若 ignite_before_boundary=False：尝试 ignite_step（条件同上）
+       c. run_step（共享 B_min）
+④ 断言 Q 不变（相对容差，兜底）
+```
+
+二选一（互斥）：
+
+| 选择 | 顺序 | 边界帧是否尝试 ignite_step |
+|---|---|---|
+| ignite_before_boundary=True | ignite → boundary → REFILL → run | 是（是否实际消耗启动损耗取决于 started=0 且 P≥P_ignite） |
+| ignite_before_boundary=False（默认） | boundary → REFILL → ignite → run | 否（启动段在 boundary 后，边界帧直接返回） |
+
+“消耗启动损耗”不是无条件的。当且仅当 started=0 且 P ≥ P_ignite 时，ignite_step 才实际执行扣除。若 started=1 或 P < P_ignite，即使 ignite_before_boundary=True，ignite_step 也不扣除。
+
+u 的分段推导：u = max(u0(1 - D/Q0), 10^-3) 要求 Q0 > 0。若 Q0=0，则所有分量均为 0（非负且和为 0；由 2.1 定义 K ≥ 0 保证 2K ≥ 0），u0(1 - 0/0) 无定义。约定 Q0=0 时 u=10^-3（最小值），安全。由 Q0 = P+2K+D+B+V+R ≥ D，当 Q0 > 0 时 0 ≤ D/Q0 ≤ 1，u0(1-D/Q0) 有定义且非负。参数约束 u0 ≥ 10^-3 保证 u ≤ u0；若 u0 < 10^-3，u 会被下限抬到 10^-3 > u0。
+
+---
+
+## 17. 合体程序
+
+```python
+def Q(S):
+    P, K, D, B, V, R = S[:6]
+    return P + 2*K + D + B + V + R
+
+
+class BoundaryConservationError(Exception):
+    pass
+
+class JointConservationError(Exception):
+    pass
+
+
+def joint_step(S, started, params):
+    """
+    合体单步。输入须为有限数（非 NaN/Inf）。
+    外部契约：boundary(S) 必须返回满足 §2.1 的合法状态（P,D,B,V,R≥0，K∈[0,9]）且 ΔQ=0。
+    """
+    P, K, D, B, V, R = S
+    Q0 = Q(S)
+
+    fill = params.fill
+    refill = params.refill
+    T_halt = params.T_halt
+
+    # 帧初值 u（Q0=0 时取 1e-3）
+    u = max(refill.u0 * (1.0 - D / Q0), 1e-3) if Q0 > 0 else 1e-3
+    # B_min 与 run_step 内部计算的 B_min 相同，共享同一停止线
+    B_min = max(fill.B_base, T_halt + fill.eps)
+
+    # 可选：启动段在 boundary 之前（是否实际消耗取决于 started 与 P）
+    if params.ignite_before_boundary:
+        P, K, D, B, V, R, started = ignite_step(
+            P, K, D, B, V, R, started, fill.P_ignite)
+        S = (P, K, D, B, V, R)
+
+    # 边界判定
+    S, E = boundary(S)
+    P, K, D, B, V, R = S
+
+    tol = 1e-9 * max(1.0, abs(Q0))
+
+    # boundary 返回后立即检查 boundary 守恒
+    if abs(Q(S) - Q0) > tol:
+        raise BoundaryConservationError(
+            f"BOUNDARY_CONSERVATION_FAIL: {Q0} -> {Q(S)}, event={E}")
+
+    if E in ("HALT", "RESET", "BREAK"):
+        return S, started, E
+
+    # REFILL（v2 部分注入）
+    rho0 = refill.gamma * u * (refill.k_star - K)
+    rho = min(rho0, max(B - B_min, 0.0)) if rho0 > 0 else 0.0
+    if rho > 0:
+        P += rho
+        B -= rho
+
+    # 可选：启动段在 REFILL 之后（是否实际消耗取决于 started 与 P）
+    if not params.ignite_before_boundary:
+        P, K, D, B, V, R, started = ignite_step(
+            P, K, D, B, V, R, started, fill.P_ignite)
+
+    # 运行段
+    P, K, D, B, V, R, started = run_step(
+        P, K, D, B, V, R, started,
+        fill.B_base, fill.beta, fill.kappa, fill.eps, T_halt)
+
+    # 断言：合体总守恒（boundary 守恒已单独检查；此处兜底 REFILL/ignite/run 合计）
+    S = (P, K, D, B, V, R)
+    if abs(Q(S) - Q0) > tol:
+        raise JointConservationError(
+            f"JOINT_CONSERVATION_FAIL: {Q0} -> {Q(S)}, event={E}")
+
+    return S, started, E
+```
+
+说明：
+- boundary 守恒检查提前：在 boundary(S) 返回后、判断 E 之前立即检查。无论 E 是什么（HALT/RESET/BREAK 或普通帧），boundary 不守恒都抛 BoundaryConservationError。
+- 错误分类统一：boundary 返回后 Q 不守恒（任何 E）→ BoundaryConservationError；合体末尾 Q 不守恒（boundary 守恒但 REFILL/ignite/run 合计不守恒）→ JointConservationError（兜底，正常不应发生）。
+- B_min 注释：与 run_step 内部计算的 B_min 相同，共享同一停止线。
+- Q(S) 辅助函数：只取前六分量，避免 NameError。
+- 外部契约：boundary(S) 必须返回合法状态（非负、K∈[0,9]）且 ΔQ=0（见 §19）。
+
+---
+
+## 18. 合体守恒与非负推导
+
+### 18.1 合体守恒（检查时机与代码对齐）
+
+合体总变化 = boundary 变化 + REFILL 变化 + ignite 变化 + run 变化：
+- boundary：ΔQ=0（外部契约）；
+- REFILL：ΔP=+ρ, ΔB=-ρ，ΔQ=0；
+- ignite：ΔP=-P_ignite, ΔD=+P_ignite，ΔQ=0；
+- run：ΔP=+flow, ΔB=-flow，ΔQ=0。
+四段各自守恒，总和守恒。boundary 守恒在 boundary(S) 返回后立即检查（无论 E 是什么，不通过抛 BoundaryConservationError）；总守恒在末尾兜底检查（boundary 守恒但 REFILL/ignite/run 合计不守恒时抛 JointConservationError，正常不应发生）。
+
+### 18.2 合体非负（在 boundary 返回合法状态的前提下）
+
+前提（修正）：由 §19 外部契约，boundary(S) 返回满足 §2.1 的合法状态，故 boundary 后 P, D, B, V, R ≥ 0、K ∈ [0,9]。以下推导依赖此前提。
+
+B 非负：
+- boundary 后 B ≥ 0（合法状态前提）。
+- REFILL 后，分三段：
+  - 若 ρ0 ≤ 0：ρ=0，B'=B ≥ 0；
+  - 若 ρ0 > 0 且 B ≥ B_min：ρ = min(ρ0, B - B_min) ≤ B - B_min，故 B' = B - ρ ≥ B_min ≥ 0；
+  - 若 ρ0 > 0 且 B < B_min：max(B - B_min, 0) = 0，故 ρ=0，B'=B ≥ 0（由合法状态前提）。
+- run 后：由性质 4，B' ≥ min(B, B_min) ≥ 0。
+
+合体级结论：由 ρ ≤ max(B - B_min, 0) 得 B' = B - ρ ≥ B - max(B - B_min, 0) = min(B, B_min)。
+
+“B_min 不可穿越”的精确表述：
+- 若 boundary 后 B ≥ B_min：REFILL 后 B' ≥ B_min（因 ρ ≤ B - B_min）；run_step 后 B' ≥ B_min（性质 4）。连续帧上，只要 boundary 不把 B 压到 B_min 以下，B ≥ B_min 保持。
+- 若 boundary 后 B < B_min：REFILL 后 B'=B（因 ρ=0）；run_step 后 B'=B（性质 4）。此时“不可穿越”退化为“不动作”——补帧算子不把 B 拉回 B_min，也不把 B 压到 B_min 以下。
+结论：“不可穿越”不是无条件的，它有两层含义：
+1. 若 B ≥ B_min，则不把 B 压到 B_min 以下（守住下限）；
+2. 若 B < B_min，则不把 B 拉回 B_min（不动作）。
+两层都不是“把 B 推向 B_min”——B_min 是下限不可穿越线（floor），不是上限，也不是吸引线。
+
+P 非负：
+- boundary 后 P ≥ 0（合法状态前提）；
+- REFILL 只增：P' = P + ρ ≥ 0；
+- ignite 要求 P ≥ P_ignite，扣除后 P' ≥ 0；
+- run 只增：P' = P + flow ≥ 0。
+D, V, R 非负：boundary 后由合法状态前提；ignite 只增 D；REFILL/run 不动 D, V, R。∎
+
+---
+
+## 19. 外部契约（统一 boundary 合法状态要求）
+
+boundary(S) 必须同时满足：
+1. 守恒：ΔQ=0，即 Q(boundary(S)) = Q(S)；
+2. 合法状态：返回的 S' 满足 §2.1 的状态定义：P', D', B', V', R' ≥ 0，K' ∈ Z ∩ [0,9]，started' ∈ {0,1}。
+若外部状态机不满足上述契约，合体断言失败，拒绝本帧，记录 BOUNDARY_CONSERVATION_FAIL。这是外部契约，不是补帧算子本体问题。
+
+为什么必须显式要求合法状态：§18.2 的非负性证明用了“boundary 后 B ≥ 0、P ≥ 0”。若 boundary 只保证 ΔQ=0，它可以返回 B=-1, P=2 这种 Q 不变但非负性破坏的状态，§18.2 的结论不再成立。把“返回合法状态”写进契约，合体级的非负、防自杀、B_min 不可穿越才是完整定理。
+
+原状态机偏差提示：若用原状态机原版 boundary，其 RESET/BREAK 分支执行后仍会走到后处理注入；原版 RESET/BREAK 的 Q 变化已包含后处理注入。本规格的 boundary 契约要求“只做边界转移，不含后处理注入”，后处理注入由合体层统一处理。若原版 boundary 自带注入，需先拆出注入部分，再接入本规格。
+
+---
+
+## 20. 语义留白
+
+### 留白 1：RESET 后 started 的状态
+
+当前代码在 E=RESET 时直接返回，不额外强制设置，保持执行到该分支时的 started 值。默认 ignite_before_boundary=False 路径下，启动段在 boundary 之后执行，RESET 分支直接返回，started 即为帧初值。若 ignite_before_boundary=True，启动段已在 boundary 之前执行（是否实际消耗取决于 started=0 且 P ≥ P_ignite），RESET 分支返回时 started 可能已为 1（若本帧实际启动）。
+
+| 语义 | 行为 |
+|---|---|
+| 保持执行到该分支时的值（默认） | 取决于 ignite_before_boundary、帧初值 started、P |
+| 强制重置为 0 | RESET 后新纪元强制 started=0。下个纪元实际是否消耗启动损耗，仍取决于默认/True 路径与下个纪元条件（见正文交叉语义：先看是否边界帧，再看 P≥P_ignite）。 |
+| 强制保持 1 | RESET 后新纪元直接运行，不再消耗启动损耗 |
+
+交叉语义（条件化补全）：
+默认 ignite_before_boundary=False 时，RESET 帧不尝试 ignite_step，started 保持帧初值：
+- 若帧初值 started=0：下个纪元仍为 0，具备重新消耗启动损耗的条件。下个纪元启动段是否实际执行，取决于下个纪元的两件事：
+  - (a) 下个纪元是否为边界帧：若仍是 HALT/RESET/BREAK 边界帧，则默认 False 路径下不尝试 ignite_step，不消耗；
+  - (b) 若不是边界帧：则取决于下个纪元的 P：若 P ≥ P_ignite，则消耗；若 P < P_ignite，则不消耗，继续等待。
+- 若帧初值 started=1：下个纪元仍为 1，不再消耗启动损耗。
+
+### 留白 2：边界帧是否尝试消耗启动损耗
+
+取决于 ignite_before_boundary：
+
+| ignite_before_boundary | 边界帧是否尝试 ignite_step | 是否实际消耗启动损耗 |
+|---|---|---|
+| False（默认） | 否（启动段在 boundary 后） | 不消耗 |
+| True | 是（启动段在 boundary 前） | 仅当 started=0 且 P ≥ P_ignite 时实际消耗；started=1 或 P < P_ignite 时不消耗 |
+
+交叉语义：默认 False 时，RESET 帧不尝试 ignite_step，started 保持帧初值，下个纪元是否消耗取决于下个纪元 started 与 P（以及是否为边界帧，见留白 1）。True 时，RESET 帧在 boundary 前尝试 ignite_step：若本帧满足 started=0 且 P ≥ P_ignite，则已消耗，started 变为 1，下个纪元不再消耗；若 started=1 或 P < P_ignite，则不消耗，started 保持原值。
+
+二选一，通过 params.ignite_before_boundary 固定。默认 False。
